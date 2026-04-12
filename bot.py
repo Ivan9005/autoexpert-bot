@@ -619,5 +619,16 @@ def main():
     app.run_polling()
 
 
+import threading
+import http.server
+import socketserver
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 10000))
+    handler = http.server.SimpleHTTPRequestHandler
+    with socketserver.TCPServer(("", port), handler) as httpd:
+        httpd.serve_forever()
+
 if __name__ == "__main__":
+    threading.Thread(target=run_dummy_server, daemon=True).start()
     main()
