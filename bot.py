@@ -8,8 +8,10 @@ from telegram.ext import (
     CallbackQueryHandler,
     MessageHandler,
     ContextTypes,
+    PicklePersistence,
     filters,
 )
+
 
 from contract_service import generate_contract
 from db_service import (
@@ -604,7 +606,14 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    app = ApplicationBuilder().token(TOKEN).build()
+    persistence = PicklePersistence(filepath="bot_state.pkl")
+
+    app = (
+        ApplicationBuilder()
+        .token(TOKEN)
+        .persistence(persistence)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("myid", myid))
