@@ -1,5 +1,7 @@
+import os
+from dotenv import load_dotenv
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from db_servise import get_last_contracts
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -10,10 +12,19 @@ from telegram.ext import (
 )
 
 from contract_service import generate_contract
-from db_servise import save_contract
+from db_service import (
+    save_contract,
+    get_last_contracts,
+    get_contract_by_id,
+    update_contract_status,
+    get_contracts_by_status,
+    get_contract_file_by_id,
+)
 
-TOKEN = "8215672410:AAEHJKC6nPAJX00lTmuojli7wx3MaM8tdZo"
-EXPERT_CHAT_ID = 7741300055 # сюда вставь chat_id эксперта
+load_dotenv()
+
+TOKEN = os.getenv("TOKEN")
+EXPERT_CHAT_ID = int(os.getenv("EXPERT_CHAT_ID", "0"))
 
 
 FIELDS_ORDER = [
@@ -31,6 +42,26 @@ FIELDS_ORDER = [
     ("CITY", "Введите город:"),
     ("DATE", "Введите дату договора (ДД.ММ.ГГГГ) или '-' чтобы поставить сегодняшнюю:"),
 ]
+
+FIELD_TITLES = {
+    "CLIENT_FIO": "ФИО",
+    "REG_ADDRESS": "Адрес регистрации",
+    "PHONE": "Телефон",
+    "PASSPORT": "Паспорт",
+    "PASSPORT_ISSUED_BY": "Кем выдан паспорт",
+    "PASSPORT_ISSUED_DATE": "Дата выдачи паспорта",
+    "AUTO_MODEL": "Марка и модель автомобиля",
+    "AUTO_YEAR": "Год выпуска",
+    "VIN": "VIN",
+    "GOS_NUMBER": "Госномер",
+    "STS_NUMBER": "СТС",
+    "CITY": "Город",
+    "DATE": "Дата договора",
+}
+
+
+def is_expert(user_id: int) -> bool:
+    return user_id == EXPERT_CHAT_ID
 
 
 def is_valid_date_format(value: str) -> bool:
@@ -149,21 +180,259 @@ def build_summary_text(data: dict) -> str:
     )
 
 
+def build_confirm_keyboard() -> InlineKeyboardMarkup:
+    keyboard = [
+        [InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_yes")],
+        [InlineKeyboardButton("✏️ Исправить данные", callback_data="confirm_edit")],
+        [InlineKeyboardButton("🔄 Заполнить заново", callback_data="confirm_restart")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def build_edit_fields_keyboard() -> InlineKeyboardMarkup:
+    keyboard = [
+        [
+            InlineKeyboardButton("ФИО", callback_data="edit_field:CLIENT_FIO"),
+            InlineKeyboardButton("Телефон", callback_data="edit_field:PHONE"),
+        ],
+        [
+            InlineKeyboardButton("Адрес", callback_data="edit_field:REG_ADDRESS"),
+            InlineKeyboardButton("Паспорт", callback_data="edit_field:PASSPORT"),
+        ],
+        [
+            InlineKeyboardButton("Кем выдан", callback_data="edit_field:PASSPORT_ISSUED_BY"),
+            InlineKeyboardButton("Дата выдачи", callback_data="edit_field:PASSPORT_ISSUED_DATE"),
+        ],
+        [
+            InlineKeyboardButton("Авто", callback_data="edit_field:AUTO_MODEL"),
+            InlineKeyboardButton("Год", callback_data="edit_field:AUTO_YEAR"),
+        ],
+        [
+            InlineKeyboardButton("VIN", callback_data="edit_field:VIN"),
+            InlineKeyboardButton("Госномер", callback_data="edit_field:GOS_NUMBER"),
+        ],
+        [
+            InlineKeyboardButton("СТС", callback_data="edit_field:STS_NUMBER"),
+            InlineKeyboardButton("Город", callback_data="edit_field:CITY"),
+        ],
+        [
+            InlineKeyboardButton("Дата договора", callback_data="edit_field:DATE"),
+        ],
+        [
+            InlineKeyboardButton("⬅ Назад к сводке", callback_data="edit_back"),
+        ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def send_summary(update_or_query_message, context: ContextTypes.DEFAULT_TYPE):
+    data_for_doc = {k: context.user_data.get(k, "") for k, _ in FIELDS_ORDER}
+    summary_text = build_summary_text(data_for_doc)
+    context.user_data["confirm_stage"] = True
+    await update_or_query_message.reply_text(
+        summary_text,
+        reply_markup=build_confirm_keyboard(),
+    )
+
+
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Ваш chat_id: {update.effective_user.id}")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
     keyboard = [
         [InlineKeyboardButton("📝 Заполнить договор", callback_data="fill_contract")],
         [InlineKeyboardButton("🔄 Сброс", callback_data="reset")],
     ]
-    await update.message.reply_text(
-        "НОВАЯ ВЕРСИЯ БОТА\n\n"
-        "Здравствуйте! Я бот для заполнения договора автоэксперта.\n"
-        "Нажмите «Заполнить договор» и ответьте на вопросы.",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+
+    if is_expert(user_id):
+        await update.message.reply_text(
+            "Здравствуйте! Вы вошли как эксперт.\n\n"
+            "Доступные команды:\n"
+            "/history — последние заявки\n"
+            "/get 5 — открыть заявку по ID\n"
+            "/status 5 done — изменить статус\n"
+            "/file 5 — получить договор по ID\n\n"
+            "Также можно заполнить договор вручную:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+    else:
+        await update.message.reply_text(
+            "Здравствуйте! Я бот для заполнения договора автоэксперта.\n"
+            "Нажмите «Заполнить договор» и ответьте на вопросы.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+
+async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    if not is_expert(user_id):
+        await update.message.reply_text("У вас нет доступа к этой команде.")
+        return
+
+    allowed_statuses = ["new", "in_progress", "done", "canceled"]
+
+    if context.args:
+        status = context.args[0].lower()
+
+        if status not in allowed_statuses:
+            await update.message.reply_text(
+                "Используй: /history new | in_progress | done | canceled"
+            )
+            return
+
+        contracts = await get_contracts_by_status(status)
+
+        if not contracts:
+            await update.message.reply_text("Нет заявок с таким статусом.")
+            return
+
+        text = f"Заявки со статусом {status}:\n\n"
+    else:
+        contracts = await get_last_contracts(5)
+
+        if not contracts:
+            await update.message.reply_text("Заявок пока нет.")
+            return
+
+        text = "Последние заявки:\n\n"
+
+    for c in contracts:
+        text += (
+            f"ID: {c.id}\n"
+            f"ФИО: {c.client_fio}\n"
+            f"Телефон: {c.phone}\n"
+            f"Авто: {c.auto_model}\n"
+            f"VIN: {c.vin}\n"
+            f"Статус: {c.status}\n\n"
+        )
+
+    await update.message.reply_text(text)
+
+
+async def get_contract_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    if not is_expert(user_id):
+        await update.message.reply_text("У вас нет доступа к этой команде.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Использование: /get 5")
+        return
+
+    try:
+        contract_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("ID должен быть числом. Пример: /get 5")
+        return
+
+    contract = await get_contract_by_id(contract_id)
+
+    if not contract:
+        await update.message.reply_text("Заявка с таким ID не найдена.")
+        return
+
+    text = (
+        f"Заявка ID: {contract.id}\n\n"
+        f"ФИО: {contract.client_fio}\n"
+        f"Адрес: {contract.reg_address}\n"
+        f"Телефон: {contract.phone}\n\n"
+        f"Паспорт: {contract.passport}\n"
+        f"Кем выдан: {contract.passport_issued_by}\n"
+        f"Дата выдачи: {contract.passport_issued_date}\n\n"
+        f"Авто: {contract.auto_model}\n"
+        f"Год: {contract.auto_year}\n"
+        f"VIN: {contract.vin}\n"
+        f"Госномер: {contract.gos_number}\n"
+        f"СТС: {contract.sts_number}\n\n"
+        f"Город: {contract.city}\n"
+        f"Дата договора: {contract.contract_date}\n\n"
+        f"Статус: {contract.status}"
     )
+
+    await update.message.reply_text(text)
+
+
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    if not is_expert(user_id):
+        await update.message.reply_text("У вас нет доступа к этой команде.")
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Использование: /status 5 done\n"
+            "Доступные статусы: new, in_progress, done, canceled"
+        )
+        return
+
+    try:
+        contract_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("ID должен быть числом. Пример: /status 5 done")
+        return
+
+    new_status = context.args[1].strip().lower()
+    allowed_statuses = ["new", "in_progress", "done", "canceled"]
+
+    if new_status not in allowed_statuses:
+        await update.message.reply_text(
+            "Недопустимый статус.\n"
+            "Используй: new, in_progress, done, canceled"
+        )
+        return
+
+    contract = await update_contract_status(contract_id, new_status)
+
+    if not contract:
+        await update.message.reply_text("Заявка с таким ID не найдена.")
+        return
+
+    await update.message.reply_text(
+        f"Статус заявки {contract.id} изменён на: {contract.status}"
+    )
+
+
+async def file_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    if not is_expert(user_id):
+        await update.message.reply_text("У вас нет доступа к этой команде.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Использование: /file 5")
+        return
+
+    try:
+        contract_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("ID должен быть числом. Пример: /file 5")
+        return
+
+    file_path = await get_contract_file_by_id(contract_id)
+
+    if not file_path:
+        await update.message.reply_text("Заявка с таким ID не найдена.")
+        return
+
+    if not os.path.exists(file_path):
+        await update.message.reply_text("Файл по этой заявке не найден на диске.")
+        return
+
+    try:
+        with open(file_path, "rb") as f:
+            await update.message.reply_document(
+                document=f,
+                caption=f"Договор по заявке ID {contract_id}"
+            )
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка отправки файла: {e}")
 
 
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -178,6 +447,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         context.user_data["field_index"] = 0
         context.user_data["confirm_stage"] = False
+        context.user_data["editing_field"] = None
 
         _, first_question = FIELDS_ORDER[0]
         await query.message.reply_text(first_question)
@@ -186,6 +456,35 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "reset":
         context.user_data.clear()
         await query.message.reply_text("Сбросил данные ✅ Нажмите /start.")
+        return
+
+    if query.data == "confirm_edit":
+        context.user_data["confirm_stage"] = False
+        await query.message.reply_text(
+            "Выберите поле, которое хотите исправить:",
+            reply_markup=build_edit_fields_keyboard(),
+        )
+        return
+
+    if query.data == "edit_back":
+        await send_summary(query.message, context)
+        return
+
+    if query.data.startswith("edit_field:"):
+        field_key = query.data.split(":", 1)[1]
+        context.user_data["editing_field"] = field_key
+        context.user_data["confirm_stage"] = False
+
+        question = None
+        for key, q in FIELDS_ORDER:
+            if key == field_key:
+                question = q
+                break
+
+        title = FIELD_TITLES.get(field_key, field_key)
+        await query.message.reply_text(
+            f"Исправление поля: {title}\n\n{question}"
+        )
         return
 
     if query.data == "confirm_yes":
@@ -205,7 +504,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         try:
-            contract_id = await save_contract(data_for_doc)
+            contract_id = await save_contract(data_for_doc, file_path)
             await query.message.reply_text(f"Сохранено в базе ✅ ID: {contract_id}")
         except Exception as e:
             await query.message.reply_text(f"Ошибка сохранения в базе: {e}")
@@ -218,7 +517,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_document(
                         chat_id=EXPERT_CHAT_ID,
                         document=f,
-                        caption=f"Новая заявка ✅\nID в базе: {contract_id}"
+                        caption=f"Новая заявка ✅\nID в базе: {contract_id}\nСтатус: new"
                     )
                 await query.message.reply_text("Спасибо! Договор отправлен эксперту ✅")
             except Exception as e:
@@ -233,36 +532,38 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         context.user_data["field_index"] = 0
         context.user_data["confirm_stage"] = False
+        context.user_data["editing_field"] = None
 
         _, first_question = FIELDS_ORDER[0]
         await query.message.reply_text("Хорошо, начинаем заново.\n" + first_question)
         return
-    
-async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    contracts = await get_last_contracts(5)
-
-    if not contracts:
-        await update.message.reply_text("Заявок пока нет.")
-        return
-
-    text = "Последние заявки:\n\n"
-
-    for c in contracts:
-        text += (
-            f"ID: {c.id}\n"
-            f"ФИО: {c.client_fio}\n"
-            f"Телефон: {c.phone}\n"
-            f"Авто: {c.auto_model}\n"
-            f"VIN: {c.vin}\n\n"
-        )
-
-    await update.message.reply_text(text)    
 
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    editing_field = context.user_data.get("editing_field")
+
+    if editing_field:
+        text = update.message.text.strip()
+
+        error = validate_input(editing_field, text)
+        if error:
+            await update.message.reply_text(error)
+            await update.message.reply_text("Введите ещё раз:")
+            return
+
+        if editing_field == "DATE" and text == "-":
+            text = ""
+
+        context.user_data[editing_field] = text
+        context.user_data["editing_field"] = None
+
+        await update.message.reply_text("Поле обновлено ✅")
+        await send_summary(update.message, context)
+        return
+
     if context.user_data.get("confirm_stage"):
         await update.message.reply_text(
-            "Сейчас нужно нажать кнопку: ✅ Подтвердить или ✏️ Заполнить заново."
+            "Сейчас нужно нажать кнопку: ✅ Подтвердить, ✏️ Исправить данные или 🔄 Заполнить заново."
         )
         return
 
@@ -295,20 +596,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["field_index"] = idx
 
     if idx >= len(FIELDS_ORDER):
-        context.user_data["confirm_stage"] = True
-
-        data_for_doc = {k: context.user_data.get(k, "") for k, _ in FIELDS_ORDER}
-        summary_text = build_summary_text(data_for_doc)
-
-        keyboard = [
-            [InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_yes")],
-            [InlineKeyboardButton("✏️ Заполнить заново", callback_data="confirm_restart")],
-        ]
-
-        await update.message.reply_text(
-            summary_text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
+        await send_summary(update.message, context)
         return
 
     _, next_question = FIELDS_ORDER[idx]
@@ -321,6 +609,9 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("myid", myid))
     app.add_handler(CommandHandler("history", history))
+    app.add_handler(CommandHandler("get", get_contract_cmd))
+    app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("file", file_cmd))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
 
